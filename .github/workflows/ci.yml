@@ -19,7 +19,7 @@ jobs:
           java-version: 17
 
       - name: Build, test, quality
-        run: mvn -B -ntp verify
+        run: mvn -Dgpg.skip=true -B -ntp verify
       - name: Upload Surefire test reports
         if: always()
         uses: actions/upload-artifact@v4
