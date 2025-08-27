@@ -1,4 +1,4 @@
-package com.supphiretechconsulting.connector;
+package io.github.ankitpec72.connector;
 
 import static org.junit.jupiter.api.Assertions.*;
 

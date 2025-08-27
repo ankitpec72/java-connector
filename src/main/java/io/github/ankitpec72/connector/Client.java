@@ -1,4 +1,4 @@
-package com.supphiretechconsulting.connector;
+package io.github.ankitpec72.connector;
 
 import java.time.Duration;
 import java.util.Objects;

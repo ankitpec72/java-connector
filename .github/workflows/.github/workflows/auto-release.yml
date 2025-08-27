@@ -1,0 +1,225 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+jobs:
+  auto-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Analyze PR for Version Bump
+        id: version_analysis
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          echo "Analyzing PR for version bump..."
+          echo "PR Title: $PR_TITLE"
+          echo "PR Labels: $PR_LABELS"
+          
+          # Check PR labels first (highest priority)
+          if echo "$PR_LABELS" | grep -qE "major|breaking"; then
+            echo "bump=major" >> $GITHUB_OUTPUT
+            echo "reason=PR labeled as major/breaking change" >> $GITHUB_OUTPUT
+          elif echo "$PR_LABELS" | grep -qE "minor|feature"; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+            echo "reason=PR labeled as minor/feature" >> $GITHUB_OUTPUT
+          elif echo "$PR_LABELS" | grep -qE "patch|bugfix|fix"; then
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "reason=PR labeled as patch/bugfix" >> $GITHUB_OUTPUT
+          # Check PR title for keywords
+          elif echo "$PR_TITLE" | grep -qiE "(BREAKING|breaking change)"; then
+            echo "bump=major" >> $GITHUB_OUTPUT
+            echo "reason=PR title contains BREAKING change" >> $GITHUB_OUTPUT
+          elif echo "$PR_TITLE" | grep -qiE "^feat[:\(]|^feature[:\(]"; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+            echo "reason=PR title starts with feat/feature" >> $GITHUB_OUTPUT
+          elif echo "$PR_TITLE" | grep -qiE "^fix[:\(]|^bug[:\(]"; then
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "reason=PR title starts with fix/bug" >> $GITHUB_OUTPUT
+          else
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "reason=Default patch bump for merged PR" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if Should Skip Release
+        id: skip_check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$PR_LABELS" | grep -qE "no-release|skip-release"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=PR labeled to skip release" >> $GITHUB_OUTPUT
+          elif echo "$PR_TITLE" | grep -qiE "\[(skip|no).?release\]"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=PR title contains [skip release]" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate Next Version
+        if: steps.skip_check.outputs.skip == 'false'
+        id: versioning
+        run: |
+          echo "📊 Calculating next version..."
+          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          
+          # Remove -SNAPSHOT if present
+          BASE_VERSION=$(echo $CURRENT_VERSION | sed 's/-SNAPSHOT//')
+          IFS='.' read -ra VERSION_PARTS <<< "$BASE_VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+          
+          BUMP_TYPE="${{ steps.version_analysis.outputs.bump }}"
+          
+          case $BUMP_TYPE in
+            "major")
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            "minor")
+              NEW_VERSION="$MAJOR.$((MINOR + 1)).0"
+              ;;
+            "patch")
+              NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+              ;;
+          esac
+          
+          echo "next=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          
+          echo "Version Analysis Results:"
+          echo "   Current: $CURRENT_VERSION"
+          echo "   Next: $NEW_VERSION"
+          echo "   Bump Type: $BUMP_TYPE"
+          echo "   Reason: ${{ steps.version_analysis.outputs.reason }}"
+
+      - name: Run Tests Before Release
+        if: steps.skip_check.outputs.skip == 'false'
+        run: |
+          echo "Running comprehensive tests before release..."
+          mvn clean verify -P central-sign -Dgpg.skip=true
+
+      - name: Set up GPG
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          GPG_KEY_CONTENTS: ${{ secrets.GPG_KEY_CONTENTS }}
+        run: |
+          echo "Setting up GPG signing..."
+          echo "$GPG_KEY_CONTENTS" | base64 --decode | gpg --import --batch --yes
+          export GPG_TTY=$(tty)
+
+      - name: Deploy to Maven Central
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY_ID: ${{ secrets.SIGNING_KEY_ID }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          echo "Deploying version ${{ steps.versioning.outputs.next }} to Maven Central..."
+          
+          # Update version in pom.xml
+          mvn -B -ntp versions:set -DnewVersion=${{ steps.versioning.outputs.next }} -DgenerateBackupPoms=false
+          
+          # Setup Maven settings
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << EOF
+          <settings>
+            <servers>
+              <server>
+                <id>central</id>
+                <username>\${env.MAVEN_CENTRAL_USERNAME}</username>
+                <password>\${env.MAVEN_CENTRAL_PASSWORD}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>gpg-signing</id>
+                <properties>
+                  <gpg.keyname>\${env.SIGNING_KEY_ID}</gpg.keyname>
+                  <gpg.passphrase>\${env.SIGNING_PASSWORD}</gpg.passphrase>
+                  <gpg.executable>gpg</gpg.executable>
+                </properties>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>gpg-signing</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+          
+          export GPG_TTY=$(tty)
+          mvn clean deploy -P central-sign
+
+      - name: Create GitHub Release
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          echo "Creating GitHub release..."
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Create and push tag
+          git tag "v${{ steps.versioning.outputs.next }}"
+          git push origin "v${{ steps.versioning.outputs.next }}"
+          
+          # Create GitHub release
+          gh release create "v${{ steps.versioning.outputs.next }}" \
+            --title "Release v${{ steps.versioning.outputs.next }}" \
+            --notes "## Auto-generated ${{ steps.versioning.outputs.bump_type }} release
+
+          ### Changes
+          - **Merged PR**: [$PR_TITLE](${PR_URL}) by @${PR_AUTHOR}
+          - **Version**: v${{ steps.versioning.outputs.current }} → v${{ steps.versioning.outputs.next }}
+          - **Bump Reason**: ${{ steps.version_analysis.outputs.reason }}
+
+          ---
+          *This release was automatically generated from PR #${PR_NUMBER}*"
+
+      - name: Comment on PR
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body " **Auto-release completed successfully!**
+
+          **v${{ steps.versioning.outputs.next }}** has been deployed to Maven Central!
+          
+          - **Version Bump**: ${{ steps.versioning.outputs.bump_type }} (${{ steps.versioning.outputs.current }} → ${{ steps.versioning.outputs.next }})
+          - **Reason**: ${{ steps.version_analysis.outputs.reason }}
+          - **GitHub Release**: [View Release](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.versioning.outputs.next }})
+          - **Maven Central**: Available within 1-2 hours
+          
+          Your library is now live for the world to use!"
+
+      - name: Log Skip Reason
+        if: steps.skip_check.outputs.skip == 'true'
+        run: |
+          echo " Release skipped: ${{ steps.skip_check.outputs.reason }}"
