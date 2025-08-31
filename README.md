@@ -217,7 +217,6 @@ This project follows **GitFlow**:
 The project includes comprehensive GitHub Actions workflows:
 
 - **Continuous Integration** (`ci.yml`): Runs on all PRs and pushes
-  - Multi-JDK testing
   - SonarCloud code quality & security analysis
   - Spotless code formatting checks
   - Build verification
@@ -230,26 +229,6 @@ The project includes comprehensive GitHub Actions workflows:
   - Semantic versioning based on PR labels/titles
   - Automatic Maven Central deployment
   - GitHub releases with generated notes
-
-## CI/CD Pipeline
-
-The project includes comprehensive GitHub Actions workflows:
-
-- **Continuous Integration** (`ci.yml`): Runs on all PRs and pushes
-  - SonarCloud code quality & security analysis
-  - Spotless code formatting checks
-  - Build verification
-
-- **Development Workflow** (`development.yml`):
-  - Automatic code formatting
-  - Release readiness checks
-  - Dependency updates
-
-- **Auto Release** (`auto-release.yml`):
-  - Semantic versioning based on PR labels/titles
-  - Automatic Maven Central deployment
-  - GitHub releases with generated notes
-
 
 ### Version Management
 
