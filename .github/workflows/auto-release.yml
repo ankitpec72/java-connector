@@ -318,6 +318,13 @@ jobs:
           export GPG_TTY=$(tty)
           mvn clean deploy -P central-sign
 
+      - name: Commit Version Update to Master
+        if: steps.skip_check.outputs.skip == 'false'
+        run: |
+          echo "Committing version update to master..."
+          git add pom.xml
+          git commit -m "chore: release version ${{ steps.versioning.outputs.next }}"
+          git push origin master
       - name: Create GitHub Release with Rich Notes
         if: steps.skip_check.outputs.skip == 'false'
         env:
