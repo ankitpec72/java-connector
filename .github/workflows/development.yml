@@ -1,0 +1,127 @@
+name: Development Workflow
+
+on:
+  push:
+    branches: [development]
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  development-build:
+    name: Development Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Cache Maven Dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+
+      - name: Run All Tests
+        run: |
+          echo "Running comprehensive test suite..."
+          mvn clean verify
+
+      - name: Generate Development Report
+        run: |
+          echo " Generating development build report..."
+          echo "## Development Build Report" > build-report.md
+          echo "- **Branch**: development" >> build-report.md
+          echo "- **Commit**: ${{ github.sha }}" >> build-report.md
+          echo "- **Author**: ${{ github.actor }}" >> build-report.md
+          echo "- **Timestamp**: $(date)" >> build-report.md
+          echo "" >> build-report.md
+          echo "### Test Results" >> build-report.md
+          mvn surefire-report:report-only > /dev/null 2>&1 || true
+          if [ -f "target/site/surefire-report.html" ]; then
+            echo "All tests passed" >> build-report.md
+          else
+            echo "Some tests failed" >> build-report.md
+          fi
+
+      - name: Check Ready for Release
+        id: release_check
+        run: |
+          echo "Checking if development branch is ready for release..."
+          
+          # Check if there are any SNAPSHOT dependencies
+          SNAPSHOTS=$(mvn dependency:list | grep SNAPSHOT | wc -l)
+          
+          # Check if all tests pass
+          TEST_STATUS="passed"
+          if ! mvn test -q; then
+            TEST_STATUS="failed"
+          fi
+          
+          # Check if version is SNAPSHOT
+          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          
+          echo "ready_check_results<<EOF" >> $GITHUB_OUTPUT
+          echo "## Release Readiness Check" >> $GITHUB_OUTPUT
+          echo "- **Current Version**: $CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "- **Tests Status**: $TEST_STATUS" >> $GITHUB_OUTPUT
+          echo "- **SNAPSHOT Dependencies**: $SNAPSHOTS" >> $GITHUB_OUTPUT
+          echo "" >> $GITHUB_OUTPUT
+          if [ "$TEST_STATUS" = "passed" ] && [ "$SNAPSHOTS" -eq 0 ]; then
+            echo "**Ready for Release**: Development branch is ready to be merged to master!" >> $GITHUB_OUTPUT
+            echo "ready=true" >> $GITHUB_OUTPUT
+          else
+            echo " **Not Ready**: Please fix issues before releasing" >> $GITHUB_OUTPUT
+            echo "ready=false" >> $GITHUB_OUTPUT
+          fi
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release Readiness Comment
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the most recent PR to development or create an issue
+          echo "Development branch build completed"
+          echo "${{ steps.release_check.outputs.ready_check_results }}"
+
+  auto-format:
+    name: Auto-Format Code
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Auto-Format Code
+        run: |
+          echo "Auto-formatting code..."
+          mvn spotless:apply
+
+      - name: Commit Formatting Changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          if ! git diff --quiet; then
+            echo "Committing formatting changes..."
+            git add .
+            git commit -m "Auto-format code [skip ci]"
+            git push
+            echo "Code formatting applied and committed"
+          else
+            echo "Code is already properly formatted"
+          fi

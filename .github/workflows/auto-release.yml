@@ -1,0 +1,406 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+jobs:
+  auto-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Analyze PR for Version Bump
+        id: version_analysis
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          echo "Analyzing PR for version bump..."
+          echo "PR Title: $PR_TITLE"
+          echo "PR Labels: $PR_LABELS"
+          
+          # Check PR labels first (highest priority)
+          if echo "$PR_LABELS" | grep -qE "major|breaking"; then
+            echo "bump=major" >> $GITHUB_OUTPUT
+            echo "reason=Breaking changes" >> $GITHUB_OUTPUT
+          elif echo "$PR_LABELS" | grep -qE "minor|feature"; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+            echo "reason=New features" >> $GITHUB_OUTPUT
+          elif echo "$PR_LABELS" | grep -qE "patch|bugfix|fix"; then
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "reason=Bug fixes" >> $GITHUB_OUTPUT
+          # Check PR title for conventional commit format
+          elif echo "$PR_TITLE" | grep -qiE "(BREAKING|breaking change)"; then
+            echo "bump=major" >> $GITHUB_OUTPUT
+            echo "reason=Breaking changes" >> $GITHUB_OUTPUT
+          elif echo "$PR_TITLE" | grep -qiE "^feat[:\(]|^feature[:\(]"; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+            echo "reason=New features" >> $GITHUB_OUTPUT
+          elif echo "$PR_TITLE" | grep -qiE "^fix[:\(]|^bug[:\(]"; then
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "reason=Bug fixes" >> $GITHUB_OUTPUT
+          else
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "reason=General improvements" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if Should Skip Release
+        id: skip_check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$PR_LABELS" | grep -qE "no-release|skip-release"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=PR labeled to skip release" >> $GITHUB_OUTPUT
+          elif echo "$PR_TITLE" | grep -qiE "\[(skip|no).?release\]"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=PR title contains [skip release]" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate Next Version
+        if: steps.skip_check.outputs.skip == 'false'
+        id: versioning
+        run: |
+          echo "📊 Calculating next version..."
+          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          
+          # Remove -SNAPSHOT if present
+          BASE_VERSION=$(echo $CURRENT_VERSION | sed 's/-SNAPSHOT//')
+          IFS='.' read -ra VERSION_PARTS <<< "$BASE_VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+          
+          BUMP_TYPE="${{ steps.version_analysis.outputs.bump }}"
+          
+          case $BUMP_TYPE in
+            "major")
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            "minor")
+              NEW_VERSION="$MAJOR.$((MINOR + 1)).0"
+              ;;
+            "patch")
+              NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+              ;;
+          esac
+          
+          echo "next=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          
+          echo "Version Analysis Results:"
+          echo "  Current: $CURRENT_VERSION"
+          echo "  Next: $NEW_VERSION"
+          echo "  Bump Type: $BUMP_TYPE"
+          echo "  Reason: ${{ steps.version_analysis.outputs.reason }}"
+
+      - name: Generate Rich Release Notes
+        if: steps.skip_check.outputs.skip == 'false'
+        id: release_notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          echo "📝 Generating comprehensive release notes..."
+          
+          # Get the last release to find commits since then
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tags found, analyzing all recent commits"
+            COMMIT_RANGE="HEAD~10..HEAD"  # Last 10 commits if no tags
+          else
+            echo "Last release: $LAST_TAG"
+            COMMIT_RANGE="$LAST_TAG..HEAD"
+          fi
+          
+          echo "📊 Analyzing commits in range: $COMMIT_RANGE"
+          
+          # Categorize commits by conventional commit types
+          FEATURES=$(git log $COMMIT_RANGE --oneline --grep="^feat" --grep="^feature" | sed 's/^/- /' | head -10)
+          FIXES=$(git log $COMMIT_RANGE --oneline --grep="^fix" --grep="^bug" | sed 's/^/- /' | head -10)
+          DOCS=$(git log $COMMIT_RANGE --oneline --grep="^docs" | sed 's/^/- /' | head -5)
+          CHORES=$(git log $COMMIT_RANGE --oneline --grep="^chore" --grep="^refactor" --grep="^style" --grep="^test" | sed 's/^/- /' | head -5)
+          BREAKING=$(git log $COMMIT_RANGE --oneline --grep="BREAKING" --grep="breaking change" -i | sed 's/^/- /' | head -3)
+          
+          # Get all other commits not categorized above
+          OTHER_COMMITS=$(git log $COMMIT_RANGE --oneline \
+            --invert-grep \
+            --grep="^feat" --grep="^feature" --grep="^fix" --grep="^bug" \
+            --grep="^docs" --grep="^chore" --grep="^refactor" --grep="^style" --grep="^test" \
+            --grep="BREAKING" --grep="breaking change" \
+            | sed 's/^/- /' | head -5)
+          
+          # Build release notes
+          cat > release_notes.md << EOF
+          ## 🚀 What's New in v${{ steps.versioning.outputs.next }}
+          
+          This ${{ steps.version_analysis.outputs.bump }} release brings **${{ steps.version_analysis.outputs.reason }}** to the Java Connector library.
+          
+          EOF
+          
+          # Add breaking changes section if any
+          if [ -n "$BREAKING" ]; then
+            cat >> release_notes.md << EOF
+          ### ⚠️ Breaking Changes
+          $BREAKING
+          
+          EOF
+          fi
+          
+          # Add features section
+          if [ -n "$FEATURES" ]; then
+            cat >> release_notes.md << EOF
+          ### ✨ New Features
+          $FEATURES
+          
+          EOF
+          fi
+          
+          # Add bug fixes section
+          if [ -n "$FIXES" ]; then
+            cat >> release_notes.md << EOF
+          ### 🐛 Bug Fixes
+          $FIXES
+          
+          EOF
+          fi
+          
+          # Add documentation section
+          if [ -n "$DOCS" ]; then
+            cat >> release_notes.md << EOF
+          ### 📚 Documentation
+          $DOCS
+          
+          EOF
+          fi
+          
+          # Add other changes section
+          if [ -n "$CHORES" ]; then
+            cat >> release_notes.md << EOF
+          ### 🔧 Maintenance
+          $CHORES
+          
+          EOF
+          fi
+          
+          # Add other commits if any
+          if [ -n "$OTHER_COMMITS" ]; then
+            cat >> release_notes.md << EOF
+          ### 📦 Other Changes
+          $OTHER_COMMITS
+          
+          EOF
+          fi
+          
+          # Add PR and installation information
+          cat >> release_notes.md << EOF
+          ### 📋 Release Information
+          - **Triggered by**: [#$PR_NUMBER - $PR_TITLE]($PR_URL) by @$PR_AUTHOR
+          - **Version**: ${{ steps.versioning.outputs.current }} → **v${{ steps.versioning.outputs.next }}**
+          - **Type**: ${{ steps.versioning.outputs.bump_type }} release
+          
+          ### 📦 Installation
+          
+          **Maven:**
+          \`\`\`xml
+          <dependency>
+              <groupId>io.github.ankitpec72</groupId>
+              <artifactId>java-connector</artifactId>
+              <version>${{ steps.versioning.outputs.next }}</version>
+          </dependency>
+          \`\`\`
+          
+          **Gradle:**
+          \`\`\`gradle
+          implementation 'io.github.ankitpec72:java-connector:${{ steps.versioning.outputs.next }}'
+          \`\`\`
+          
+          ---
+          
+          ### 🔗 Quick Links
+          - 📋 [Full Changelog](https://github.com/${{ github.repository }}/compare/${LAST_TAG}...v${{ steps.versioning.outputs.next }})
+          - 📖 [Documentation](https://github.com/${{ github.repository }}#readme)
+          - 🐛 [Report Issues](https://github.com/${{ github.repository }}/issues)
+          - 💬 [Discussions](https://github.com/${{ github.repository }}/discussions)
+          - 📊 [Code Quality](https://sonarcloud.io/summary/new_code?id=ankitpec72_java-connector)
+          
+          EOF
+          
+          # Output the release notes for debugging
+          echo "Generated release notes:"
+          echo "========================"
+          cat release_notes.md
+          echo "========================"
+          
+          # Set output for next step
+          echo 'notes<<EOF' >> $GITHUB_OUTPUT
+          cat release_notes.md >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      - name: Run Tests Before Release
+        if: steps.skip_check.outputs.skip == 'false'
+        run: |
+          echo "🧪 Running comprehensive tests before release..."
+          mvn clean verify -P central-sign -Dgpg.skip=true
+
+      - name: Set up GPG
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          GPG_KEY_CONTENTS: ${{ secrets.GPG_KEY_CONTENTS }}
+        run: |
+          echo "🔐 Setting up GPG signing..."
+          echo "$GPG_KEY_CONTENTS" | base64 --decode | gpg --import --batch --yes
+          export GPG_TTY=$(tty)
+
+      - name: Deploy to Maven Central
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY_ID: ${{ secrets.SIGNING_KEY_ID }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          echo "🚀 Deploying version ${{ steps.versioning.outputs.next }} to Maven Central..."
+          
+          # Update version in pom.xml
+          mvn -B -ntp versions:set -DnewVersion=${{ steps.versioning.outputs.next }} -DgenerateBackupPoms=false
+          
+          # Setup Maven settings
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << EOF
+          <settings>
+            <servers>
+              <server>
+                <id>central</id>
+                <username>\${env.MAVEN_CENTRAL_USERNAME}</username>
+                <password>\${env.MAVEN_CENTRAL_PASSWORD}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>gpg-signing</id>
+                <properties>
+                  <gpg.keyname>\${env.SIGNING_KEY_ID}</gpg.keyname>
+                  <gpg.passphrase>\${env.SIGNING_PASSWORD}</gpg.passphrase>
+                  <gpg.executable>gpg</gpg.executable>
+                </properties>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>gpg-signing</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+          
+          export GPG_TTY=$(tty)
+          mvn clean deploy -P central-sign
+
+      - name: Create GitHub Release with Rich Notes
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "📋 Creating GitHub release with enhanced notes..."
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Create and push tag
+          git tag "v${{ steps.versioning.outputs.next }}"
+          git push origin "v${{ steps.versioning.outputs.next }}"
+          
+          # Create GitHub release with the rich release notes
+          gh release create "v${{ steps.versioning.outputs.next }}" \
+            --title "🚀 Release v${{ steps.versioning.outputs.next }}" \
+            --notes-file release_notes.md
+
+      - name: Comment on PR with Enhanced Info
+        if: steps.skip_check.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "## 🎉 Auto-release completed successfully!
+
+          **v${{ steps.versioning.outputs.next }}** has been deployed to Maven Central!
+          
+          ### 📊 Release Summary
+          - **Version Bump**: ${{ steps.versioning.outputs.bump_type }} (${{ steps.versioning.outputs.current }} → v${{ steps.versioning.outputs.next }})
+          - **Reason**: ${{ steps.version_analysis.outputs.reason }}
+          - **GitHub Release**: [📋 View Release](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.versioning.outputs.next }})
+          - **Maven Central**: 📦 Available within 1-2 hours
+          - **Quality**: [📊 SonarCloud Analysis](https://sonarcloud.io/summary/new_code?id=ankitpec72_java-connector)
+          
+          ### 🚀 Installation
+          **Maven:**
+          \`\`\`xml
+          <dependency>
+              <groupId>io.github.ankitpec72</groupId>
+              <artifactId>java-connector</artifactId>
+              <version>${{ steps.versioning.outputs.next }}</version>
+          </dependency>
+          \`\`\`
+          
+          **Gradle:**
+          \`\`\`gradle
+          implementation 'io.github.ankitpec72:java-connector:${{ steps.versioning.outputs.next }}'
+          \`\`\`
+          
+          Your library is now live for the world to use! 🌍"
+
+      - name: Update Development Branch Version
+        if: steps.skip_check.outputs.skip == 'false'
+        run: |
+          echo "🔄 Updating development branch with next SNAPSHOT version..."
+          
+          # Checkout development
+          git fetch origin development
+          git checkout development
+          git merge master --no-edit
+          
+          # Calculate next development version
+          RELEASE_VERSION="${{ steps.versioning.outputs.next }}"
+          IFS='.' read -ra VERSION_PARTS <<< "$RELEASE_VERSION"
+          MAJOR=${VERSION_PARTS[0]}
+          MINOR=${VERSION_PARTS[1]}
+          PATCH=${VERSION_PARTS[2]}
+          
+          # Bump patch for next development cycle
+          NEXT_DEV_VERSION="$MAJOR.$MINOR.$((PATCH + 1))-SNAPSHOT"
+          
+          # Update pom.xml with development version
+          mvn -B -ntp versions:set -DnewVersion=$NEXT_DEV_VERSION -DgenerateBackupPoms=false
+          
+          # Commit and push
+          git add pom.xml
+          git commit -m "chore: bump development version to $NEXT_DEV_VERSION [skip ci]"
+          git push origin development
+          
+          echo "✅ Development branch updated to $NEXT_DEV_VERSION"
+
+      - name: Log Skip Reason
+        if: steps.skip_check.outputs.skip == 'true'
+        run: |
+          echo "⏭️ Release skipped: ${{ steps.skip_check.outputs.reason }}"
