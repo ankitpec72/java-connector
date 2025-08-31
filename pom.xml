@@ -37,12 +37,35 @@
     </scm>
 
     <properties>
+        <!-- Java Configuration -->
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- Plugin Versions -->
+        <maven.compiler.plugin.version>3.14.0</maven.compiler.plugin.version>
+        <maven.surefire.plugin.version>3.5.3</maven.surefire.plugin.version>
+        <maven.source.plugin.version>3.3.1</maven.source.plugin.version>
+        <maven.javadoc.plugin.version>3.11.3</maven.javadoc.plugin.version>
+        <maven.gpg.plugin.version>3.2.8</maven.gpg.plugin.version>
+        <central.publishing.plugin.version>0.8.0</central.publishing.plugin.version>
+        <spotless.plugin.version>2.46.1</spotless.plugin.version>
+        <sonar.plugin.version>5.2.0.4988</sonar.plugin.version>
+
+        <!-- Dependency Versions -->
         <junit.jupiter.version>5.13.4</junit.jupiter.version>
         <jacoco.version>0.8.13</jacoco.version>
-        <maven.compiler.release>17</maven.compiler.release>
+        <google.java.format.version>1.17.0</google.java.format.version>
+
+        <!-- SonarCloud Configuration -->
+        <sonar.organization>ankitpec72</sonar.organization>
+        <sonar.projectKey>ankitpec72_java-connector</sonar.projectKey>
+        <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+        <sonar.java.coveragePlugin>jacoco</sonar.java.coveragePlugin>
+        <sonar.dynamicAnalysis>reuseReports</sonar.dynamicAnalysis>
+        <sonar.language>java</sonar.language>
+        <sonar.cpd.exclusions>**/*Test.java</sonar.cpd.exclusions>
     </properties>
 
     <dependencies>
@@ -59,7 +82,7 @@
             <!-- Java compiler -->
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.14.0</version>
+                <version>${maven.compiler.plugin.version}</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
                 </configuration>
@@ -68,13 +91,13 @@
             <!-- Unit tests -->
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.3</version>
+                <version>${maven.surefire.plugin.version}</version>
             </plugin>
 
-            <!-- Required by Maven Central -->
+            <!-- Source JAR - Required by Maven Central -->
             <plugin>
                 <artifactId>maven-source-plugin</artifactId>
-                <version>3.3.1</version>
+                <version>${maven.source.plugin.version}</version>
                 <executions>
                     <execution>
                         <goals>
@@ -84,9 +107,10 @@
                 </executions>
             </plugin>
 
+            <!-- JavaDoc JAR - Required by Maven Central -->
             <plugin>
                 <artifactId>maven-javadoc-plugin</artifactId>
-                <version>3.11.3</version>
+                <version>${maven.javadoc.plugin.version}</version>
                 <configuration>
                     <failOnError>false</failOnError>
                     <additionalJOptions>
@@ -122,15 +146,16 @@
                     </execution>
                 </executions>
             </plugin>
-            <!-- Code formatting -->
+
+            <!-- Code formatting with Spotless -->
             <plugin>
                 <groupId>com.diffplug.spotless</groupId>
                 <artifactId>spotless-maven-plugin</artifactId>
-                <version>2.46.1</version>
+                <version>${spotless.plugin.version}</version>
                 <configuration>
                     <java>
                         <googleJavaFormat>
-                            <version>1.17.0</version>
+                            <version>${google.java.format.version}</version>
                             <style>GOOGLE</style>
                         </googleJavaFormat>
                     </java>
@@ -142,6 +167,13 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+
+            <!-- SonarCloud Maven Plugin -->
+            <plugin>
+                <groupId>org.sonarsource.scanner.maven</groupId>
+                <artifactId>sonar-maven-plugin</artifactId>
+                <version>${sonar.plugin.version}</version>
             </plugin>
         </plugins>
     </build>
@@ -156,44 +188,14 @@
 
     <profiles>
         <profile>
-            <id>central</id>
+            <id>central-sign</id>
             <build>
                 <plugins>
-                    <!-- Source plugin -->
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-source-plugin</artifactId>
-                        <version>3.2.1</version>
-                        <executions>
-                            <execution>
-                                <id>attach-sources</id>
-                                <goals>
-                                    <goal>jar-no-fork</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-
-                    <!-- Javadoc plugin -->
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>3.4.1</version>
-                        <executions>
-                            <execution>
-                                <id>attach-javadocs</id>
-                                <goals>
-                                    <goal>jar</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-
                     <!-- GPG signing plugin -->
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
-                        <version>3.0.1</version>
+                        <version>${maven.gpg.plugin.version}</version>
                         <executions>
                             <execution>
                                 <id>sign-artifacts</id>
@@ -211,10 +213,11 @@
                         </executions>
                     </plugin>
 
+                    <!-- Central Publishing Plugin -->
                     <plugin>
                         <groupId>org.sonatype.central</groupId>
                         <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>0.4.0</version>
+                        <version>${central.publishing.plugin.version}</version>
                         <extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
