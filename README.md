@@ -12,11 +12,7 @@ A lightweight, dependency-minimal Java library for connecting to third-party ser
 ## Features
 
 - **Zero heavy dependencies** - Built with minimal external dependencies
-- **High performance** - Optimized for production workloads
-- **Secure by default** - Built-in security best practices
-- **Type-safe** - Full Java generics support with compile-time safety
 - **Well documented** - Comprehensive JavaDoc and examples
-- **Retry logic** - Configurable retry mechanisms with exponential backoff
 - **Timeout handling** - Configurable request timeouts
 - **Thoroughly tested** - High test coverage with integration tests
 
